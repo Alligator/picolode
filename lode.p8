@@ -78,6 +78,12 @@ function drawdebug()
 	end
 end
 
+function snap(n)
+	-- i have no idea why this works, and why i dont need to check if remainder > 4 to round
+	local rem = n % 8
+	return n - rem
+end
+
 function getflags(x, y)
 	local v = mget(x/8, y/8)
 	return fget(v)
@@ -87,39 +93,26 @@ function checkflag(flags, flag)
 	return band(flags, flag) > 0
 end
 
--- function checktile(x, y)
--- 	local f = getflags(x, y)
--- 	return {
--- 		solid	= checkflag(f, flags.solid),
--- 		ladder	= checkflag(f, flags.ladder),
--- 		wire	= checkflag(f, flags.wire),
--- 	}
--- end
-
 function checkedges(x, y, dx, dy)
-	local x_result, y_top_result, y_bottom_result
+	local x_result, y_result
 	local nx = x + dx
 	local ny = y + dy
 
-	if dx < 0 then
-		-- left
-		local tl = getflags(nx, y)
-		local bl = getflags(nx, y + 7)
-		x_result = bor(tl, bl)
-	elseif dx > 0 then
-		-- right
-		local tr = getflags(nx + 7, y)
-		local br = getflags(nx + 7, y + 7)
-		x_result = bor(tr, br)
+	if dx > 0 then
+		nx += 7
+	end
+
+	local tl = getflags(nx, y)
+	local bl = getflags(nx, y + 7)
+	x_result = bor(tl, bl)
+
+	if dy > 0 then
+		ny += 7
 	end
 
 	local tl = getflags(x, ny)
 	local tr = getflags(x + 7, ny)
-	y_top_result = bor(tl, tr)
-
-	local bl = getflags(x, ny + 7)
-	local br = getflags(x + 7, ny + 7)
-	y_bottom_result = bor(bl, br)
+	y_result = bor(tl, tr)
 
 	return {
 		x = {
@@ -127,15 +120,10 @@ function checkedges(x, y, dx, dy)
 			ladder = checkflag(x_result, flags.ladder),
 			wire = checkflag(x_result, flags.wire),
 		},
-		y_top = {
-			solid = checkflag(y_top_result, flags.solid),
-			ladder = checkflag(y_top_result, flags.ladder),
-			wire = checkflag(y_top_result, flags.wire),
-		},
-		y_bottom = {
-			solid = checkflag(y_bottom_result, flags.solid),
-			ladder = checkflag(y_bottom_result, flags.ladder),
-			wire = checkflag(y_bottom_result, flags.wire),
+		y = {
+			solid = checkflag(y_result, flags.solid),
+			ladder = checkflag(y_result, flags.ladder),
+			wire = checkflag(y_result, flags.wire),
 		}
 	}
 end
@@ -153,190 +141,120 @@ function move3(thing, dirs)
 		x_accel = thing.x_accel,
 		y_accel = thing.y_accel,
 	}
+
 	if not MOVEMENT_TOGGLE then
 		newmove.x_accel = 0
 		newmove.y_accel = 0
 	end
 
-	if dirs.l then
-		newmove.x_accel = -thing.x_speed
-	elseif dirs.r then
-		newmove.x_accel = thing.x_speed
-	end
-
-	if dirs.u then
-		newmove.y_accel = -thing.y_speed
-	elseif dirs.d then
-		newmove.y_accel = thing.y_speed
-	end
-
-	local edges = checkedges(newmove.x, newmove.y, newmove.x_accel, newmove.y_accel)
-	log(' ex', edges.x)
-	log('eyt', edges.y_top)
-	log('eyb', edges.y_bottom)
-	if edges.x.solid then
-		newmove.x_accel = 0
-	end
-
 	if move_state == MOVE_NORMAL then
-		if dirs.u or dirs.d then
-			local a = getflags(newmove.x + newmove.x_accel + 4, newmove.y + newmove.y_accel + 7)
-			local b = getflags(newmove.x + newmove.x_accel + 5, newmove.y + newmove.y_accel + 7)
-			local f = bor(a, b)
-			if checkflag(f, flags.ladder) then
-				move_state = MOVE_CLIMBING
+		-- you can only fall while on the ground
+		local edges = checkedges(newmove.x, newmove.y, 0, 1)
+		if not edges.y.solid and not edges.y.ladder and not edges.x.wire then
+			move_state = MOVE_FALLING
+		-- attempt to climb ladder takes first input prio
+		elseif dirs.u or dirs.d then
+			local x = newmove.x + newmove.x_accel
+			local y = newmove.y + newmove.y_accel + 7
+			if dirs.d then y += 8 end
+
+			for i=3,4,1 do
+				local f = getflags(x+i, y)
+				if checkflag(f, flags.ladder) then
+					move_state = MOVE_CLIMBING
+					newmove.x = snap(x+i)
+					newmove.x_accel = 0
+				end
 			end
 		end
-		newmove.y_accel = 0
+		-- normally, you can only move left or right.
+		-- state might have changed!
+		-- (if fsm becomes a function we can just return early and avoid this extra if)
+		if move_state == MOVE_NORMAL then
+			if dirs.l or dirs.r then
+				newmove.x_accel = thing.x_speed
+				if dirs.l then
+					newmove.x_accel *= -1
+				end
+
+				local edges = checkedges(newmove.x, newmove.y, newmove.x_accel, 0)
+				if edges.x.solid then
+					newmove.x_accel = 0
+				end
+			end
+		end
+	-- fixme: takes an extra frame to start climbing, but maybe it'll go away if we animate into the climb
 	elseif move_state == MOVE_CLIMBING then
-		-- probably should be a function this lot
-		local a = getflags(newmove.x + newmove.x_accel + 4, newmove.y + newmove.y_accel + 7)
-		local b = getflags(newmove.x + newmove.x_accel + 5, newmove.y + newmove.y_accel + 7)
-		local f = bor(a, b)
-		if not checkflag(f, flags.ladder) then
+		if dirs.u or dirs.d then
+			newmove.x = snap(newmove.x)
+			newmove.y_accel = thing.y_speed
+			-- fixme: probably store the time on the ladder so we can move the first frame
+			if time % 3 != 0 then
+				newmove.y_accel = 0
+			end
+			if dirs.u then
+				newmove.y_accel *= -1
+			end	
+			local f = bor(
+				getflags(newmove.x, newmove.y + newmove.y_accel + 7),
+				getflags(newmove.x, newmove.y + newmove.y_accel)
+			)
+			-- ok so i don't like this separation of x_accel and y_accel instead of just
+			-- modifying newmove.x and .y directly. because we are changing the move state *here*
+			-- but we don't actually change the x and y until the end of the function
+			-- which means if for some reason you decide to ignore the move, you've already
+			-- mutated the move_state. maybe move_state just needs to be in newmove but at this
+			-- point it feels like you should just have this func mutate
+			if checkflag(f, flags.solid) then
+				newmove.y_accel = 0
+				if dirs.d then
+					move_state = MOVE_NORMAL
+				end
+			elseif not checkflag(f, flags.ladder) then
+				move_state = MOVE_NORMAL
+			end
+		end
+
+		if dirs.l or dirs.r then
+			-- just push you off the ladder?
+			-- no this is annoying
+			newmove.x_accel = thing.x_speed
+			if dirs.l then
+				newmove.x_accel *= -1
+			end
+
+			local edges = checkedges(newmove.x, newmove.y, newmove.x_accel, 0)
+			if edges.x.solid then
+				newmove.x_accel = 0
+			end
+
+			for i=3,4,1 do
+				local f = getflags(newmove.x+i, newmove.y)
+				if not checkflag(f, flags.ladder) then
+					move_state = MOVE_FALLING
+					newmove.x = snap(newmove.x+i)
+					newmove.x_accel = 0
+				end
+			end
+		end
+	elseif move_state == MOVE_FALLING then
+		newmove.x_accel = 0
+		newmove.y_accel = time % 2
+		local edges = checkedges(newmove.x, newmove.y, 0, newmove.y_accel)
+		if edges.y.solid or edges.y.ladder then
 			move_state = MOVE_NORMAL
-		elseif dirs.u and edges.y_top.solid then
-			newmove.y_accel = 0
-		elseif dirs.d and edges.y_bottom.solid then
 			newmove.y_accel = 0
 		end
+		-- fixme: check for wires?
+	elseif move_state == MOVE_HANGING then
+	
 	end
 
-	log('m', newmove)
 	newmove.x += newmove.x_accel
 	newmove.y += newmove.y_accel
 
 	return newmove
 end
-
--- {{{ shite
-function canclimb(thing, dirs)
-	local bf = getflags(thing.x, thing.y + 7)
-	local ff = getflags(thing.x, thing.y + 8)
-
-	if checkflag(bf, flags.ladder) and checkflag(ff, flags.ladder) then
-		return true
-	end
-
-	if dirs.u then
-		return checkflag(bf, flags.ladder) and not checkflag(ff, flags.ladder)
-	elseif dirs.d then
-		return not checkflag(bf, flags.ladder) and checkflag(ff, flags.ladder)
-	end
-	return false
-end
-
-function canmove(x, y)
-	local ff = bor(
-		getflags(x, y),
-		getflags(x, y + 7)
-	)
-	return (not checkflag(ff, flags.solid)) or canclimb({ x = x, y = y }, {})
-end
-
-function isfalling(thing)
-	local y = -flr(-thing.y)
-	local ff = bor(
-		getflags(thing.x, y + 8),
-		getflags(thing.x + 8, y + 8)
-	)
-	return not (checkflag(ff, flags.solid) or checkflag(ff, flags.ladder))
-end
-
-function ishanging(thing)
-	local ff = getflags(thing.x + 4, thing.y)
-	return checkflag(ff, flags.wire)
-end
-
-function snap(n)
-	return flr(n / 8) * 8
-end
-
-function move_fsm(thing, dirs)
-	local newmove = {
-		x = thing.x,
-		y = thing.y,
-		x_accel = thing.x_accel,
-		y_accel = thing.y_accel,
-	}
-	if not MOVEMENT_TOGGLE then
-		newmove.x_accel = 0
-		newmove.y_accel = 0
-	end
-
-	if move_state == MOVE_NORMAL then
-		if dirs.l or dirs.r then
-			if isfalling(newmove) then
-				move_state = MOVE_FALLING
-			elseif ishanging(newmove) then
-				newmove.y = snap(thing.y)
-				move_state = MOVE_HANGING
-			else 
-				newmove.x_accel = (dirs.l and -thing.x_speed) or (dirs.r and thing.x_speed)
-			end
-		end
-
-		if dirs.d or dirs.u then
-			if canclimb(thing, dirs) then
-				local speed = thing.y_accel
-				speed = (dirs.u and -thing.y_speed) or (dirs.d and thing.y_speed) or speed
-				newmove.x = snap(thing.x)
-				newmove.y_accel = speed
-				move_state = MOVE_CLIMBING
-			end
-			--newmove.x_accel = 0
-		end
-	elseif move_state == MOVE_CLIMBING then
-		if dirs.l and canmove(thing.x, thing.y) then
-			newmove.x = thing.x
-			move_state = MOVE_FALLING
-		elseif dirs.r and canmove(thing.x + 8, thing.y) then
-			newmove.x = thing.x
-			move_state = MOVE_FALLING
-		elseif dirs.u or dirs.d then
-			if canclimb(thing, dirs) then
-				local speed = thing.y_accel
-				speed = (dirs.u and -thing.y_speed) or (dirs.d and thing.y_speed) or speed
-				newmove.y_accel = speed			
-			else
-				move_state = MOVE_NORMAL
-			end
-		end
-	elseif move_state == MOVE_HANGING then
-		if dirs.l or dirs.r then
-			newmove.x_accel = (dirs.l and -thing.x_speed) or (dirs.r and thing.x_speed)
-			if not ishanging(newmove) then
-				move_state = MOVE_NORMAL
-			end
-		end
-		if dirs.d then
-			move_state = MOVE_FALLING
-		end
-	elseif move_state == MOVE_FALLING then
-		if ishanging(newmove) and not dirs.d then
-			newmove.y = snap(thing.y)
-			move_state = MOVE_HANGING
-		elseif not isfalling(newmove) then
-			move_state = MOVE_NORMAL
-			newmove.y_accel = 0
-		else
-			newmove.x_accel = 0
-			newmove.y_accel = thing.y_speed
-		end
-	end
-
-	if not canmove(newmove.x + newmove.x_accel, newmove.y + newmove.y_accel) then
-		newmove.x_accel = 0
-		newmove.y_accel = 0
-		newmove.x = snap(newmove.x)
-		newmove.y = snap(newmove.y)
-	end
-
-	newmove.x = newmove.x + newmove.x_accel
-	newmove.y = newmove.y + newmove.y_accel
-	return newmove
-end
--- }}}
 
 function dig(thing, digx)
 	local f = getflags(digx, thing.y + 8)
@@ -466,14 +384,14 @@ __gfx__
 00700700cccccc0c7777777700000000ccc00c0c00877e0000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000cccccc0c7000000700000000ccc00c0c0877887000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000000000007000000700000000000000000062260000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000800000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000707007000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000770070700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000000070700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000707007000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000077000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-00000000770000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000870000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
@@ -612,8 +530,8 @@ __map__
 0000000000020303030303030303030300000000000000000500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000020000000101020000000001010101010101010101020101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0000000000020000000101020000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0000000000020000000101020000000000000000000000050000020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-0102010101010000000101010101010101010101010201010101010101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+0000000000020000000101020000020000020200000000050000020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+0102010101010000000101010101010101010101020100010101010101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0002000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0002000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 0101010101010101020101010101010101010101010200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
